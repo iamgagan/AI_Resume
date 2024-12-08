@@ -1,0 +1,348 @@
+import gradio as gr
+from openai import OpenAI
+import json
+import os
+import pyaudio
+import wave
+import threading
+import queue
+import speech_recognition as sr
+from datetime import datetime
+
+class WallStreetInterviewPrep:
+    def __init__(self):
+        self.audio_queue = queue.Queue()
+        self.recording = False
+        self.role_categories = {
+            "Investment Banking": [
+                "Background", "Behavioral", "Accounting", "Valuation", "M&A", "DCF",
+                "Enterprise & Equity Value", "Financial Modeling", "Market Trends & Analysis",
+                "Brain Teasers"
+            ],
+            "Private Equity": [
+                "Background", "Behavioral", "Valuation", "LBO", "Due Diligence",
+                "Deal Structuring", "Return Metrics & Levers", "Market Trends & Analysis",
+                "Portfolio & Risk Management", "Exit Strategies"
+            ],
+            "Venture Capital": [
+                "Background", "Behavioral", "Startup Valuation Techniques", "Due Diligence",
+                "Investment Strategies", "Fundraising & Capital Allocation",
+                "Term Sheets & Deal Structuring", "Market Trends & Analysis",
+                "Exit Strategies", "Portfolio Management"
+            ],
+            "Growth Equity": [
+                "Background", "Behavioral", "Valuation", "Due Diligence",
+                "Investment Strategies", "Capital Allocation", "Deal Structuring",
+                "Market Trends & Analysis", "Exit Strategies", "Portfolio Management"
+            ],
+            "Asset Management": [
+                "Background", "Behavioral", "Valuation", "Asset Allocation",
+                "Risk Assessment", "Investment Strategies", "Market Trends & Analysis",
+                "Portfolio Management", "Performance Metrics", "Research Methods",
+                "Alternative Investments", "Economic Outlook"
+            ],
+            "Sales & Trading": [
+                "Background", "Behavioral", "Market Trends & Analysis",
+                "Trading Strategies", "Financial Products", "Risk Management",
+                "Market-Making", "Economic Indicators", "Technical Analysis",
+                "Brain Teasers"
+            ],
+            "Hedge Fund": [
+                "Background", "Behavioral", "Valuation", "Market Trends & Analysis",
+                "Industry Knowledge", "Investment Strategies", "Risk Management",
+                "Portfolio Risk Management", "Economic Outlook", "Stock Pitch",
+                "Performance Metrics"
+            ],
+            "Equity Research": [
+                "Background", "Behavioral", "Accounting", "Valuation",
+                "Market Trends & Analysis", "Investment Thesis Development",
+                "Stock Pitch", "Macroeconomic Analysis", "Risk Assessment"
+            ],
+            "Transaction Advisory": [
+                "Background", "Behavioral", "Accounting", "Valuation",
+                "Due Diligence", "Deal Structuring", "Market Trends & Analysis"
+            ],
+            "Capital Markets": [
+                "Background", "Behavioral", "Accounting", "Valuation",
+                "Financial Instruments", "Bond Pricing", "Credit & Liquidity Analysis",
+                "Debt & Equity Offerings", "Enterprise & Equity Value",
+                "Capital Structure", "Public vs. Private Markets",
+                "Market Trends & Analysis"
+            ],
+            "Management Consulting": [
+                "Background", "Behavioral", "Problem Solving", "Case Study",
+                "Business Strategy", "Data Analysis & Interpretation",
+                "Client Management", "Market Trends & Analysis", "Brain Teasers"
+            ],
+            "Corporate Finance": [
+                "Background", "Behavioral", "Valuation", "Capital Budgeting",
+                "Capital Structure", "M&A", "Financial Statement Analysis",
+                "Corporate Strategy", "Cost of Capital", "Risk Management"
+            ],
+            "Wealth Management": [
+                "Background", "Behavioral", "Investment Strategies",
+                "Portfolio Management", "Risk Management",
+                "Client Relationship Management", "Retirement & Estate Planning",
+                "Tax Optimization"
+            ],
+            "Commercial Banking": [
+                "Background", "Behavioral", "Credit Analysis",
+                "Loan Structuring & Underwriting", "Risk Management",
+                "Regulatory Compliance", "Financial Statement Analysis",
+                "Relationship Management", "Portfolio Management",
+                "Market and Economic Trends"
+            ],
+            "Business Development": [
+                "Background", "Behavioral", "Lead Generation & Sales Strategy",
+                "Market Research & Analysis", "Relationship Management",
+                "Revenue Growth Strategies", "Performance Metrics & KPIs",
+                "Problem Solving", "Risk Management", "Market Trends & Analysis"
+            ]
+        }
+        
+    def get_categories_for_role(self, role):
+        """Get categories for a specific role"""
+        return self.role_categories.get(role, ["Background", "Behavioral"])
+        
+    def record_response(self, state):
+        """Record audio response"""
+        audio_file = self.record_audio()
+        if audio_file and os.path.exists(audio_file):
+            return audio_file, state
+        return None, state
+
+    def stop_recording(self, state):
+        """Stop recording audio"""
+        self.recording = False
+        return state
+    
+    def record_audio(self):
+        """Record audio from microphone with noise reduction"""
+        CHUNK = 1024
+        FORMAT = pyaudio.paInt16
+        CHANNELS = 1
+        RATE = 44100
+        
+        p = pyaudio.PyAudio()
+        self.recording = True
+        
+        try:
+            stream = p.open(format=FORMAT,
+                          channels=CHANNELS,
+                          rate=RATE,
+                          input=True,
+                          frames_per_buffer=CHUNK,
+                          input_device_index=None)
+            
+            print("Recording started...")
+            frames = []
+            
+            while self.recording:
+                try:
+                    data = stream.read(CHUNK, exception_on_overflow=False)
+                    frames.append(data)
+                except Exception as e:
+                    print(f"Error during recording: {e}")
+                    break
+            
+            print("Recording stopped...")
+            
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+            
+            # Save recording with proper path
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(os.getcwd(), f"interview_response_{timestamp}.wav")
+            
+            wf = wave.open(filename, 'wb')
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(p.get_sample_size(FORMAT))
+            wf.setframerate(RATE)
+            wf.writeframes(b''.join(frames))
+            wf.close()
+            
+            return filename
+            
+        except Exception as e:
+            print(f"Error setting up audio recording: {e}")
+            return None
+    
+    def analyze_response(self, api_key, audio_file, question):
+        """Analyze interview response using OpenAI"""
+        try:
+            if not os.path.exists(audio_file):
+                return {"error": "Audio file not found"}
+
+            client = OpenAI(api_key=api_key)
+            
+            # Transcribe audio
+            recognizer = sr.Recognizer()
+            try:
+                with sr.AudioFile(audio_file) as source:
+                    # Apply noise reduction
+                    recognizer.adjust_for_ambient_noise(source)
+                    audio = recognizer.record(source)
+                
+                transcript = recognizer.recognize_google(audio)
+                if not transcript:
+                    return {"error": "No speech detected in the recording"}
+                    
+            except Exception as e:
+                return {"error": f"Transcription failed: {str(e)}"}
+
+            # Analyze response using OpenAI
+            analysis_prompt = f"""
+            Analyze this interview response:
+            
+            Question: {question}
+            Candidate's Response: {transcript}
+            
+            Provide a brief evaluation of the response and suggestions for improvement.
+            """
+
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are an expert at evaluating interview responses."},
+                        {"role": "user", "content": analysis_prompt}
+                    ]
+                )
+                
+                return {"feedback": response.choices[0].message.content}
+            except Exception as e:
+                return {"error": f"OpenAI API error: {str(e)}"}
+                
+        except Exception as e:
+            return {"error": f"Unexpected error during analysis: {str(e)}"}
+        
+    def analyze_audio(self, api_key, audio_file, question_state):
+        """Analyze interview response"""
+        if not audio_file:
+            return "Please record a response first."
+        
+        if not isinstance(audio_file, str):
+            return "Invalid audio file format. Please try recording again."
+            
+        if not os.path.exists(audio_file):
+            return "Audio file not found. Please try recording again."
+            
+        analysis = self.analyze_response(api_key, audio_file, question_state["question"])
+        
+        if "error" in analysis:
+            return f"Error in analysis: {analysis['error']}"
+        
+        return analysis["feedback"]
+
+    
+
+    def generate_question(self, api_key, role, category, level):
+        """Generate interview question using OpenAI API"""
+        client = OpenAI(api_key=api_key)
+        
+        prompt = f"""As an experienced {role} interviewer, generate a single, focused {category} 
+        interview question for a {level} candidate. The question should be specific to {role} 
+        and appropriate for their experience level and the {category} category."""
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an expert Wall Street interviewer. Provide only the interview question without any additional information."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7
+            )
+            
+            return {"question": response.choices[0].message.content}
+        except Exception as e:
+            return {"error": str(e)}
+
+
+def create_gradio_interface():
+    """Create Gradio interface for the interview prep app"""
+    interviewer = WallStreetInterviewPrep()
+    
+    def update_categories(role):
+        """Update categories based on selected role"""
+        return gr.Dropdown(choices=interviewer.get_categories_for_role(role))
+    
+    def interview_flow(api_key, role, category, level):
+        question_data = interviewer.generate_question(api_key, role, category, level)
+        
+        if "error" in question_data:
+            return f"Error: {question_data['error']}", None, None
+        
+        return question_data["question"], None, question_data
+
+    with gr.Blocks(title="Wall Street Interview Prep") as app:
+        gr.Markdown("# Wall Street Interview Preparation Assistant")
+        
+        with gr.Row():
+            api_key = gr.Textbox(label="OpenAI API Key", type="password")
+        
+        with gr.Row():
+            role = gr.Dropdown(
+                choices=list(interviewer.role_categories.keys()),
+                label="Select Role"
+            )
+            category = gr.Dropdown(
+                choices=[],
+                label="Question Category"
+            )
+            level = gr.Dropdown(
+                choices=["Entry Level", "Associate", "VP"],
+                label="Experience Level"
+            )
+
+        # Update categories when role changes
+        role.change(
+            update_categories,
+            inputs=[role],
+            outputs=[category]
+        )
+
+        generate_btn = gr.Button("Generate Question")
+        question_output = gr.Textbox(label="Interview Question", lines=3)
+        
+        with gr.Row():
+            record_btn = gr.Button("Start Recording")
+            stop_btn = gr.Button("Stop Recording")
+        
+        audio_output = gr.Audio(label="Your Response", type="filepath")
+        analyze_btn = gr.Button("Analyze Response")
+        feedback_output = gr.Textbox(label="Feedback", lines=5)
+        
+        question_state = gr.State()
+        
+        # Set up event handlers
+        generate_btn.click(
+            interview_flow,
+            inputs=[api_key, role, category, level],
+            outputs=[question_output, audio_output, question_state]
+        )
+        
+        record_btn.click(
+            interviewer.record_response,
+            inputs=[question_state],
+            outputs=[audio_output, question_state]
+        )
+        
+        stop_btn.click(
+            interviewer.stop_recording,
+            inputs=[question_state],
+            outputs=[question_state]
+        )
+        
+        analyze_btn.click(
+            interviewer.analyze_audio,  # Changed from analyze_interview to analyze_audio
+            inputs=[api_key, audio_output, question_state],
+            outputs=[feedback_output]
+        )
+
+    return app
+
+if __name__ == "__main__":
+    app = create_gradio_interface()
+    app.launch(share=True)
